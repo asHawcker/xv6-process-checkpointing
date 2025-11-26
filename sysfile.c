@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // --- START OF FIX ---
 
@@ -54,6 +55,7 @@ struct check_point_header {
   struct trapframe tf;
 };
 
+extern pte_t* walkpgdir(pde_t *pgdir, const void *va, int alloc);
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -482,6 +484,37 @@ sys_pipe(void)
   return 0;
 }
 
+// this function copies data from the page table 
+int
+copy_from_pgdir(pde_t *pgdir, void *dst_k, uint src_va, uint len)
+{
+  uint va = src_va;
+  uint end = src_va + len;
+  char *d = (char*)dst_k;
+  
+  while(va < end){
+    uint va0 = (uint)PGROUNDDOWN(va);
+    pte_t *pte = walkpgdir(pgdir, (void*)va0, 0);
+    
+    if(pte == 0 || (*pte & PTE_P) == 0){
+        memset(d, 0, end - va);
+        break; 
+    }
+    
+    uint pa = PTE_ADDR(*pte);
+    uint offset = va - va0;
+    uint chunk = PGSIZE - offset;
+    if(chunk > (end - va)) chunk = end - va;
+    
+    char *src_k = (char*)P2V(pa);
+    memmove(d, src_k + offset, chunk);
+  
+    va += chunk;
+    d += chunk;
+  }
+  return 0;
+}
+
 int
 sys_checkpoint(void)
 {
@@ -494,28 +527,22 @@ sys_checkpoint(void)
   if(argint(0, &pid) < 0 || argstr(1, &filename) < 0)
     return -1;
 
-  p = myproc();
-  if (p->pid != pid) {
-      cprintf("Only self-checkpoint supported.\n");
-      return -1; 
-  }
-
-  for(int fd = 3; fd < NOFILE; fd++){
-      if(p->ofile[fd]){
-          cprintf("Warning: Process has open file descriptors. These will not be saved.\n");
-      }
+  p = findproc(pid);
+  if(p == 0){
+      cprintf("Checkpoint: PID %d not found.\n", pid);
+      return -1;
   }
 
   hdr.pid = p->pid;
   hdr.sz = p->sz;
-  hdr.tf = *p->tf; 
+  hdr.tf = *p->tf;
+
 
   begin_op();
   if((ip = create(filename, 2, 0, 0)) == 0){
     end_op();
     return -1;
   }
-  
   if(writei(ip, (char*)&hdr, 0, sizeof(hdr)) != sizeof(hdr)){
     iunlockput(ip);
     end_op();
@@ -523,7 +550,7 @@ sys_checkpoint(void)
   }
   end_op(); 
 
-  // write memory into the file
+  // save Memory
   int written = 0;
   uint addr = 0;
   uint size = p->sz;
@@ -533,7 +560,14 @@ sys_checkpoint(void)
     if(n > 1024) n = 1024; 
     
     char kbuffer[1024]; 
-    memmove(kbuffer, (void*)addr, n);
+
+    // CRITICAL CHANGE:
+    // to save self use memmove else we use copy_from_pgdir helper function
+    if(p == myproc()){
+        memmove(kbuffer, (void*)addr, n);
+    } else {
+        copy_from_pgdir(p->pgdir, kbuffer, addr, n);
+    }
     
     begin_op();
     if(writei(ip, kbuffer, sizeof(hdr) + written, n) != n){
@@ -548,7 +582,6 @@ sys_checkpoint(void)
     addr += n;
   }
 
-  //Unlock
   begin_op();
   iunlockput(ip);
   end_op();

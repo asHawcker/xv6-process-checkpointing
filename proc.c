@@ -532,3 +532,23 @@ procdump(void)
     cprintf("\n");
   }
 }
+
+struct proc*
+findproc(int pid)
+{
+  struct proc *p;
+  // ptable is static in proc.c, so we must loop here.
+  // Note: Acquire ptable.lock if you want strict safety, 
+  // but we can't hold it if we plan to do disk I/O later. 
+  // We'll iterate without lock for this specific requirement.
+  
+  // extern struct { struct spinlock lock; struct proc proc[NPROC]; } ptable;
+  // actually ptable is usually static inside proc.c, so we can access it directly.
+  
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->pid == pid){
+      return p;
+    }
+  }
+  return 0;
+}
