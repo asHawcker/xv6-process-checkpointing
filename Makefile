@@ -185,6 +185,7 @@ UPROGS=\
 	_recover\
 	_check_fd\
 	_check_pid\
+	_imginfo\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)

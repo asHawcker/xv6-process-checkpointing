@@ -17,9 +17,8 @@
 #include "fcntl.h"
 #include "memlayout.h"
 
-// --- START OF FIX ---
+#define CHECKPOINT_HEADER_ID 0xDEADBEEF
 
-// 1. Manually define struct trapframe (standard x86 layout)
 struct trapframe {
   uint edi;
   uint esi;
@@ -48,10 +47,11 @@ struct trapframe {
   ushort padding6;
 };
 
-// 2. Define the checkpoint header using the struct above
 struct check_point_header {
+  uint id;
   int pid;
   uint sz;
+  char name[16];
   struct trapframe tf;
 };
 
@@ -533,9 +533,11 @@ sys_checkpoint(void)
       return -1;
   }
 
+  hdr.id = CHECKPOINT_HEADER_ID;
   hdr.pid = p->pid;
   hdr.sz = p->sz;
   hdr.tf = *p->tf;
+  safestrcpy(hdr.name, p->name, sizeof(hdr.name));
 
 
   begin_op();
@@ -612,6 +614,13 @@ sys_restart(void)
     iunlockput(ip);
     end_op();
     return -1;
+  }
+
+  if(hdr.id != CHECKPOINT_HEADER_ID){
+      cprintf("Restart Error: File is not a valid checkpoint image.\n");
+      iunlockput(ip);
+      end_op();
+      return -1;
   }
 
   // Resize process memory to match saved state
