@@ -23,6 +23,8 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int checkpoint(int pid, char *file);
+int restart(char *file);
 
 // ulib.c
 int stat(const char*, struct stat*);

@@ -16,6 +16,45 @@
 #include "file.h"
 #include "fcntl.h"
 
+// --- START OF FIX ---
+
+// 1. Manually define struct trapframe (standard x86 layout)
+struct trapframe {
+  uint edi;
+  uint esi;
+  uint ebp;
+  uint oesp;
+  uint ebx;
+  uint edx;
+  uint ecx;
+  uint eax;
+  ushort gs;
+  ushort padding1;
+  ushort fs;
+  ushort padding2;
+  ushort es;
+  ushort padding3;
+  ushort ds;
+  ushort padding4;
+  uint trapno;
+  uint err;
+  uint eip;
+  ushort cs;
+  ushort padding5;
+  uint eflags;
+  uint esp;
+  ushort ss;
+  ushort padding6;
+};
+
+// 2. Define the checkpoint header using the struct above
+struct check_point_header {
+  int pid;
+  uint sz;
+  struct trapframe tf;
+};
+
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -440,5 +479,151 @@ sys_pipe(void)
   }
   fd[0] = fd0;
   fd[1] = fd1;
+  return 0;
+}
+
+int
+sys_checkpoint(void)
+{
+  int pid;
+  char *filename;
+  struct proc *p;
+  struct inode *ip;
+  struct check_point_header hdr;
+  
+  if(argint(0, &pid) < 0 || argstr(1, &filename) < 0)
+    return -1;
+
+  p = myproc();
+  if (p->pid != pid) {
+      cprintf("Only self-checkpoint supported.\n");
+      return -1; 
+  }
+
+  for(int fd = 3; fd < NOFILE; fd++){
+      if(p->ofile[fd]){
+          cprintf("Warning: Process has open file descriptors. These will not be saved.\n");
+      }
+  }
+
+  hdr.pid = p->pid;
+  hdr.sz = p->sz;
+  hdr.tf = *p->tf; 
+
+  begin_op();
+  if((ip = create(filename, 2, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+  
+  if(writei(ip, (char*)&hdr, 0, sizeof(hdr)) != sizeof(hdr)){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  end_op(); 
+
+  // write memory into the file
+  int written = 0;
+  uint addr = 0;
+  uint size = p->sz;
+  
+  while(written < size){
+    int n = size - written;
+    if(n > 1024) n = 1024; 
+    
+    char kbuffer[1024]; 
+    memmove(kbuffer, (void*)addr, n);
+    
+    begin_op();
+    if(writei(ip, kbuffer, sizeof(hdr) + written, n) != n){
+         cprintf("Checkpoint: write failed\n");
+         iunlockput(ip);
+         end_op();
+         return -1;
+    }
+    end_op();
+    
+    written += n;
+    addr += n;
+  }
+
+  //Unlock
+  begin_op();
+  iunlockput(ip);
+  end_op();
+  
+  return 0;
+}
+
+int
+sys_restart(void)
+{
+  char *path;
+  struct inode *ip;
+  struct check_point_header hdr;
+  struct proc *p = myproc();
+  
+  if(argstr(0, &path) < 0)
+    return -1;
+
+  begin_op();
+  if((ip = namei(path)) == 0){
+    end_op();
+    return -1;
+  }
+  ilock(ip);
+
+  // Read Header
+  if(readi(ip, (char*)&hdr, 0, sizeof(hdr)) != sizeof(hdr)){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  // Resize process memory to match saved state
+  if(hdr.sz > p->sz){
+      if((p->sz = allocuvm(p->pgdir, p->sz, hdr.sz)) == 0){
+          iunlockput(ip);
+          end_op();
+          return -1;
+      }
+  } else if(hdr.sz < p->sz){
+      p->sz = deallocuvm(p->pgdir, p->sz, hdr.sz);
+  }
+  
+  int read_bytes = 0;
+  uint addr = 0;
+  uint size = hdr.sz;
+  
+  while(read_bytes < size){
+      char kbuffer[1024];
+      int n = size - read_bytes;
+      if(n > sizeof(kbuffer)) n = sizeof(kbuffer);
+      
+      // Read from file to kernel buffer
+      if(readi(ip, kbuffer, sizeof(hdr) + read_bytes, n) != n){
+          cprintf("Restart: read failed\n");
+          iunlockput(ip);
+          end_op();
+          return -1;
+      }
+
+      // Copy from kernel buffer to user memory
+      memmove((void*)addr, kbuffer, n);
+      
+      read_bytes += n;
+      addr += n;
+  }
+
+  // Restore CPU state
+  *p->tf = hdr.tf;
+  
+  // Set return value of the syscall to 0 to indicate success
+  p->tf->eax = 0; 
+
+  iunlockput(ip);
+  end_op();
+  
   return 0;
 }
